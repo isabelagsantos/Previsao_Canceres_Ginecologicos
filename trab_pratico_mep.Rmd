@@ -2,7 +2,7 @@
 
 **Informações da série selecionada:**
 
-Casos mensais de **diagnóstico de câncer ginecológicos** (CID C51–C58) de **jan/2018 a dez/2025 no Brasil**
+Casos mensais de **diagnóstico de cânceres ginecológicos** (CID C51–C58) de **jan/2018 a dez/2025 no Brasil**
 
 ## Pacotes
 
