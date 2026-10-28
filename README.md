@@ -52,3 +52,7 @@ install.packages(c("tidyverse", "knitr", "kableExtra",
    ```
 
 4. Abra o `.Rmd` no RStudio e execute os blocos (*Run*) ou gere o relatório completo com **Knit**.
+
+## Desenvolvimento
+
+**Projeto em andamento.**
