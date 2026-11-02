@@ -26,8 +26,9 @@ Aplicação de métodos estatísticos de previsão a uma série temporal de **ca
 ```
 .
 ├── README.md
-├── trab_pratico_mep.Rmd      # Código e análise (R Markdown)
-└── serie_casos_diagnostico_cancer_ginecologico_mensal_2018_2025.csv    # Série mensal de casos diagnosticados
+├── dados/          # séries mensais tratadas (.csv)
+├── codigo/         # análises em R / R Markdown
+└── resultados/     # tabelas e gráficos gerados
 ```
 
 
