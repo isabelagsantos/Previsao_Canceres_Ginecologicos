@@ -23,7 +23,7 @@ library(tseries)
 
 ```{r}
 # Entrada de dados
-dados <- read.csv("C:/Users/isabe/Downloads/ufmg/2026_2/MEP/Trabalho_pratico/serie_casos_diagnostico_cancer_ginecologico_mensal_2018_2025.csv")
+dados <- read.csv("C:/Users/isabe/Downloads/ufmg/2026_2/MEP/trabalho_pratico/dados/serie_casos_diagnostico_cancer_ginecologico_mensal_2018_2025.csv")
 
 y <- ts(dados$diag, start = c(2018, 1), frequency = 12)
 ```
@@ -242,7 +242,6 @@ g_z_barras <- ggplot(dados, aes(x = data, y = z, fill = abs(z) > 2)) +
   ) +
   labs(
     title = "Escores z dos casos mensais",
-    subtitle = "Linhas tracejadas: ±2 desvios; pontilhadas: ±3 desvios",
     x = "Tempo",
     y = "Escore z"
   ) +
