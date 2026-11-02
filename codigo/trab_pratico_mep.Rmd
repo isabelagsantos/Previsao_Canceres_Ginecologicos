@@ -15,6 +15,14 @@ library(kableExtra)
 library(patchwork)
 library(forecast)
 library(tseries)
+
+# Pastas do projeto (caminhos relativos à pasta do .Rmd, que fica em codigo/)
+dir_dados      <- "../dados"
+dir_resultados <- "../resultados"
+
+dir.create(file.path(dir_resultados, "graficos"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(dir_resultados, "tabelas"),  recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(dir_resultados, "modelos"),  recursive = TRUE, showWarnings = FALSE)
 ```
 
 ## Bloco 0: Análise exploratória
@@ -22,8 +30,9 @@ library(tseries)
 ### Preparação e definições:
 
 ```{r}
-# Entrada de dados
-dados <- read.csv("C:/Users/isabe/Downloads/ufmg/2026_2/MEP/trabalho_pratico/dados/serie_casos_diagnostico_cancer_ginecologico_mensal_2018_2025.csv")
+# Entrada de dados (caminho relativo: pasta "dados" ao lado deste arquivo)
+dados <- read.csv(file.path(dir_dados,
+  "serie_casos_diagnostico_cancer_ginecologico_mensal_2018_2025.csv"))
 
 y <- ts(dados$diag, start = c(2018, 1), frequency = 12)
 ```
@@ -43,13 +52,57 @@ tema_relatorio <- theme_bw(base_size = 12) +
   )
 ```
 
+Funções auxiliares (salvar resultados e padronizar tabelas e gráficos):
+
+```{r}
+# Salva um gráfico (ggplot ou patchwork) em resultados/graficos
+salvar_grafico <- function(g, nome, largura = 9, altura = 5) {
+  ggsave(file.path(dir_resultados, "graficos", paste0(nome, ".png")),
+         plot = g, width = largura, height = altura, dpi = 300)
+  invisible(g)
+}
+
+# Salva uma tabela em resultados/tabelas (CSV com ; e vírgula decimal)
+salvar_tabela <- function(df, nome) {
+  write.csv2(df, file.path(dir_resultados, "tabelas", paste0(nome, ".csv")),
+             row.names = FALSE, fileEncoding = "UTF-8")
+  invisible(df)
+}
+
+# Tabela kable com o estilo padrão do relatório
+kable_padrao <- function(df, legenda) {
+  kable(df, caption = legenda) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  full_width = FALSE,
+                  position = "center")
+}
+
+# Converte o tempo de uma série ts em datas (primeiro dia de cada mês)
+ts_para_data <- function(s) {
+  m <- round(as.numeric(time(s)) * 12)
+  as.Date(sprintf("%d-%02d-01", m %/% 12, m %% 12 + 1))
+}
+
+# Gráfico simples de uma série ts
+grafico_ts <- function(s, titulo, ylab) {
+  df <- tibble(data = ts_para_data(s), valor = as.numeric(s))
+  ggplot(df, aes(x = data, y = valor)) +
+    geom_line(colour = "black", linewidth = 0.7) +
+    labs(title = titulo, x = "Tempo", y = ylab) +
+    tema_relatorio
+}
+
+# Previsão pontual: objeto forecast ou série ts (caso da MMS)
+media_prev <- function(p) if (inherits(p, "forecast")) p$mean else p
+```
+
 ### Treino (80%) e teste (20%)
 
 Como são 96 observações (12 meses em cada um dos 8 anos), serão 77 observações para treino e 19 para teste.
 
 ```{r}
 n <- length(y)
-n_teste  <- round(floor(0.2 * n), 0)
+n_teste  <- floor(0.2 * n)
 n_treino <- n - n_teste
 
 treino <- window(y, end   = time(y)[n_treino])
@@ -78,6 +131,8 @@ divisao <- tibble(
                   formatar_data_ts(y,      "fim"))
 )
 
+salvar_tabela(divisao, "divisao_treino_teste")
+
 # Tabela formatada
 kable(divisao,
       caption = "Divisão da série temporal em treino e teste",
@@ -85,6 +140,39 @@ kable(divisao,
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = FALSE,
                 position = "center")
+```
+
+Funções auxiliares que dependem da divisão treino/teste:
+
+```{r}
+# RMSE no conjunto de teste para uma lista de previsões
+rmse_teste <- function(lista_prev) sapply(lista_prev, function(p) {
+  a <- accuracy(p, teste); a[nrow(a), "RMSE"]
+})
+
+# Tabela de métricas (RMSE, MAE, MAPE) no conjunto de teste
+tab_metricas <- function(lista_prev) {
+  m <- t(sapply(lista_prev, function(p) {
+    a <- accuracy(p, teste)
+    a[nrow(a), c("RMSE", "MAE", "MAPE")]
+  }))
+  tibble(Modelo = rownames(m),
+         RMSE = round(m[, "RMSE"], 2),
+         MAE  = round(m[, "MAE"], 2),
+         MAPE = round(m[, "MAPE"], 2))
+}
+
+# Gráfico das previsões de um grupo de modelos contra o conjunto de teste
+grafico_previsoes <- function(lista_prev, titulo) {
+  g <- autoplot(treino, series = "Treino") +
+    autolayer(teste, series = "Teste")
+  for (nm in names(lista_prev)) {
+    g <- g + autolayer(media_prev(lista_prev[[nm]]), series = nm)
+  }
+  g +
+    labs(title = titulo, x = "Tempo", y = "Casos diagnosticados", colour = "") +
+    tema_relatorio
+}
 ```
 
 ### Análise exploratória
@@ -162,6 +250,12 @@ quartis <- quantile(x, c(0.25, 0.50, 0.75))
 decis   <- quantile(x, seq(0.1, 0.9, 0.1))
 percent <- quantile(x, c(0.01, 0.05, 0.10, 0.90, 0.95, 0.99))
 iqr     <- IQR(x)
+
+medidas_posicao <- bind_rows(
+  tibble(Tipo = "Quartil",    Medida = names(quartis), Valor = unname(quartis)),
+  tibble(Tipo = "Decil",      Medida = names(decis),   Valor = unname(decis)),
+  tibble(Tipo = "Percentil",  Medida = names(percent), Valor = unname(percent))
+)
 
 # Percentil empírico e escore z
 dados <- dados %>%
@@ -253,6 +347,11 @@ g_box_ano
 g_box_mes
 g_z_barras
 
+salvar_grafico(g_box_geral, "box_geral", 5, 5)
+salvar_grafico(g_box_ano,   "box_por_ano", 9, 5)
+salvar_grafico(g_box_mes,   "box_por_mes", 9, 5)
+salvar_grafico(g_z_barras,  "escores_z", 10, 5)
+
 # 6. Tabelas resumo com kable
 fmt <- function(v) format(round(unname(v), 2), nsmall = 2, decimal.mark = ",")
 
@@ -265,6 +364,14 @@ resumo <- tibble(
             fmt(desvio), fmt(cv), as.character(classif_cv),
             fmt(quartis[1]), fmt(quartis[3]), fmt(iqr))
 )
+
+salvar_tabela(resumo, "sintese_numerica")
+salvar_tabela(cv_por_ano, "cv_por_ano")
+salvar_tabela(medidas_posicao, "medidas_posicao")
+salvar_tabela(outliers_tukey %>% select(data, ano, mes, casos = x, z, percentil),
+              "outliers_tukey")
+salvar_tabela(dados %>% select(data, ano, mes, casos = x, z, percentil),
+              "serie_com_escores_z")
 
 kable(resumo,
       caption = "Síntese numérica dos casos mensais diagnosticados") %>%
@@ -318,6 +425,7 @@ g_serie <- ggplot(dados, aes(x = data, y = x)) +
   )
 
 g_serie
+salvar_grafico(g_serie, "serie_temporal", 10, 5)
 
 # Visualização do padrão mensal por ano
 g_sazonal <- ggseasonplot(y, year.labels = FALSE, year.labels.left = FALSE) +
@@ -337,6 +445,7 @@ g_sazonal <- ggseasonplot(y, year.labels = FALSE, year.labels.left = FALSE) +
   )
 
 g_sazonal
+salvar_grafico(g_sazonal, "padrao_sazonal_anos_sobrepostos", 9, 6)
 
 # Decomposição clássica da série temporal
 dec <- decompose(y)
@@ -388,45 +497,25 @@ g_decomposicao <- (p1 / p2 / p3 / p4) +
   )
 
 g_decomposicao
+salvar_grafico(g_decomposicao, "decomposicao_classica", 9, 10)
 ```
 
 #### Análises de autocorrelação (ACF) e autocorrelação parcial (PACF)
 
 ```{r}
-# ACF
-Acf(y, lag.max = 36, 
-    main = "Função de Autocorrelação (ACF)",
-    ylab = "Autocorrelação",
-    xlab = "Defasagem (Lags)",
-    col = "steelblue",      # Cor das linhas
-    lwd = 2,                # Espessura das linhas
-    ci.col = "grey40")      # Cor do intervalo de confiança
-
-# PACF
-Pacf(y, lag.max = 36, 
-     main = "Função de Autocorrelação Parcial (PACF)",
-     ylab = "Autocorrelação Parcial",
-     xlab = "Defasagem (Lags)",
-     col = "steelblue", 
-     lwd = 2, 
-     ci.col = "grey40")
-```
-
-```{r}
-criar_grafico_correlacao <- function(serie, tipo = "ACF", lag_max = 36) {
+criar_grafico_correlacao <- function(serie, tipo = "ACF", lag_max = 36, titulo = NULL) {
   if (tipo == "ACF") {
     obj <- Acf(serie, lag.max = lag_max, plot = FALSE)
-    titulo <- "Função de Autocorrelação (ACF)"
+    if (is.null(titulo)) titulo <- "Função de Autocorrelação (ACF)"
     y_lab <- "Autocorrelação"
+    valores <- as.numeric(obj$acf)[-1]   # descarta o lag 0
   } else {
     obj <- Pacf(serie, lag.max = lag_max, plot = FALSE)
-    titulo <- "Função de Autocorrelação Parcial (PACF)"
+    if (is.null(titulo)) titulo <- "Função de Autocorrelação Parcial (PACF)"
     y_lab <- "Autocorrelação Parcial"
+    valores <- as.numeric(obj$acf)       # o PACF já começa no lag 1
   }
-  df <- data.frame(
-    lag = as.numeric(obj$lag),
-    acf = as.numeric(obj$acf)
-  )
+  df <- data.frame(lag = seq_along(valores), acf = valores)
   limite <- qnorm((1 + 0.95) / 2) / sqrt(length(serie))
   ggplot(df, aes(x = lag, y = acf)) +
     geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -limite, ymax = limite),
@@ -434,12 +523,8 @@ criar_grafico_correlacao <- function(serie, tipo = "ACF", lag_max = 36) {
     geom_hline(yintercept = 0, colour = "grey40") +
     geom_segment(aes(xend = lag, yend = 0), colour = "steelblue", linewidth = 0.8) +
     geom_hline(yintercept = c(-limite, limite), linetype = "dashed", colour = "firebrick") +
-    scale_x_continuous(breaks = seq(0, lag_max, by = 6)) +
-    labs(
-      title = titulo,
-      x = "Defasagem (Lags)",
-      y = y_lab
-    ) +
+    scale_x_continuous(breaks = seq(6, lag_max, by = 6)) +
+    labs(title = titulo, x = "Defasagem (Lags)", y = y_lab) +
     tema_relatorio +
     theme(
       panel.grid.major.x = element_blank(),
@@ -452,6 +537,9 @@ g_pacf <- criar_grafico_correlacao(y, tipo = "PACF", lag_max = 36)
 
 g_acf
 g_pacf
+
+salvar_grafico(g_acf,  "acf_serie_original", 9, 5)
+salvar_grafico(g_pacf, "pacf_serie_original", 9, 5)
 ```
 
 #### Testes de estacionariedade
@@ -459,8 +547,6 @@ g_pacf
 ```{r}
 adf_orig  <- adf.test(treino);       kpss_orig <- kpss.test(treino)
 adf_diff  <- adf.test(diff(treino)); kpss_diff <- kpss.test(diff(treino))
-n_dif  <- ndiffs(treino)
-n_sdif <- nsdiffs(treino)
 
 leitura <- function(adf, kpss, a = 0.05) {
   rej_adf <- adf$p.value < a; rej_kpss <- kpss$p.value < a
@@ -482,29 +568,82 @@ tabela_testes <- tibble(
                     leitura(adf_diff, kpss_diff)), each = 2)
 )
 
+salvar_tabela(tabela_testes, "testes_estacionariedade")
+
 # Formatando no kable
 kable(tabela_testes,
-      caption = "Testes de raiz unitária para a série temporal",
+      caption = "Testes de raiz unitária para a série temporal (treino)",
       col.names = c("Série", "Teste", "Estatística", "p-valor", "Conclusão")) %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = FALSE,
                 position = "center") %>%
   column_spec(5, bold = TRUE) # Deixa a coluna de conclusão em negrito
-
-tabela_difs <- tibble(
-  Tipo = c("Diferença simples (média)", "Diferença sazonal sugerida (nsdiffs)"),
-  Quantidade = c(n_dif, n_sdif)
-)
-
-kable(tabela_difs,
-      caption = "Número de diferenças recomendadas",
-      col.names = c("Tipo de diferença", "Quantidade (d)")) %>%
-  kable_styling(bootstrap_options = c("striped", "hover"),
-                full_width = FALSE,
-                position = "center")
 ```
 
+## Funções de diagnóstico de resíduos
 
+Painel de diagnóstico conforme as orientações de Diagnóstico de Resíduos: resíduos vs. tempo, histograma, Q-Q, ACF/PACF dos resíduos e testes de Ljung-Box, Shapiro-Wilk e Kolmogorov-Smirnov.
+
+```{r}
+# Graus de liberdade a descontar no Ljung-Box de um ARIMA: p + q
+fitdf_arima <- function(m) sum(arimaorder(m)[c("p", "q")])
+
+diagnostico_residuos <- function(m, rotulo, arquivo, fitdf = 0, lag_lb = 24) {
+  r_ts <- residuals(m)
+  r    <- as.numeric(r_ts)
+  dados_r <- tibble(data = ts_para_data(r_ts), res = r)
+
+  g_tempo <- ggplot(dados_r, aes(x = data, y = res)) +
+    geom_line(colour = "black", linewidth = 0.6) +
+    geom_hline(yintercept = 0, colour = "firebrick", linetype = "dashed") +
+    labs(title = "Resíduos ao longo do tempo", x = "Tempo", y = "Resíduo") +
+    tema_relatorio
+
+  g_hist <- ggplot(dados_r, aes(x = res)) +
+    geom_histogram(aes(y = after_stat(density)), bins = 15,
+                   fill = "grey85", colour = "grey40") +
+    stat_function(fun = dnorm, args = list(mean = mean(r), sd = sd(r)),
+                  colour = "firebrick") +
+    labs(title = "Histograma dos resíduos", x = "Resíduo", y = "Densidade") +
+    tema_relatorio
+
+  g_qq <- ggplot(dados_r, aes(sample = res)) +
+    stat_qq(colour = "steelblue") +
+    stat_qq_line(colour = "firebrick") +
+    labs(title = "Gráfico Q-Q dos resíduos",
+         x = "Quantis teóricos", y = "Quantis amostrais") +
+    tema_relatorio
+
+  g_acf_r  <- criar_grafico_correlacao(r_ts, "ACF",  36, "ACF dos resíduos")
+  g_pacf_r <- criar_grafico_correlacao(r_ts, "PACF", 36, "PACF dos resíduos")
+
+  g_painel <- (g_tempo / (g_hist | g_qq) / (g_acf_r | g_pacf_r)) +
+    plot_annotation(
+      title = paste("Diagnóstico dos resíduos:", rotulo),
+      theme = theme(plot.title = element_text(face = "bold", size = 14))
+    )
+
+  salvar_grafico(g_painel, arquivo, 10, 11)
+
+  lb <- Box.test(r, lag = lag_lb, type = "Ljung-Box", fitdf = fitdf)
+  sw <- shapiro.test(r)
+  ks <- suppressWarnings(ks.test(as.numeric(scale(r)), "pnorm"))
+
+  testes <- tibble(
+    Teste = c("Ljung-Box", "Shapiro-Wilk", "Kolmogorov-Smirnov"),
+    H0 = c("Resíduos são ruído branco",
+           "Resíduos têm distribuição normal",
+           "Resíduos têm distribuição normal"),
+    Estatística = round(c(lb$statistic, sw$statistic, ks$statistic), 3),
+    `p-valor` = round(c(lb$p.value, sw$p.value, ks$p.value), 4)
+  ) %>%
+    mutate(Conclusão = ifelse(`p-valor` < 0.05, "Rejeita H0", "Não rejeita H0"))
+
+  salvar_tabela(testes, arquivo)
+
+  list(grafico = g_painel, testes = testes)
+}
+```
 
 ## Bloco 1: Grupo de modelos de regressão
 
@@ -522,18 +661,15 @@ tabela_regressao <- tibble(
   Modelo   = c("1.1 Tendência linear",
                "1.2 Polinomial (quadrática)",
                "1.3 Tendência + sazonalidade (dummies)",
-               "1.4 Quadrática + sazonalidade",
-               "1.5 Crescimento exponencial"),
+               "1.4 Quadrática + sazonalidade"),
   Forma    = c("$Y_t = \\beta_0 + \\beta_1 t + \\varepsilon_t$",
                "$Y_t = \\beta_0 + \\beta_1 t + \\beta_2 t^2 + \\varepsilon_t$",
                "$Y_t = \\beta_0 + \\beta_1 t + \\sum_i \\alpha_i D_{i,t} + \\varepsilon_t$",
-               "1.2 + dummies",
-               "$\\log Y_t = \\log \\beta_0 + \\beta_1 t + \\varepsilon_t$"),
+               "1.2 + dummies"),
   `Quando usar` = c("Base; série com crescimento constante",
                     "Curvatura de longo prazo",
                     "Efeitos mensais fixos ao longo dos anos",
-                    "Curvatura e sazonalidade juntas",
-                    "Crescimento proporcional")
+                    "Curvatura e sazonalidade juntas")
 )
 
 kable(tabela_regressao,
@@ -549,47 +685,41 @@ kable(tabela_regressao,
 
 
 ```{r}
-# Sazonalidade
-sazonalidade <- factor(cycle(y))
-contrasts(sazonalidade) <- contr.sum(12)
-
-# Modelos de regressão (previsão)
+# Modelos de regressão (ajuste no treino)
 reg_lin  <- tslm(treino ~ trend)
 reg_quad <- tslm(treino ~ trend + I(trend^2))
-reg_saz  <- tslm(treino ~ trend + season)            
+reg_saz  <- tslm(treino ~ trend + season)
 reg_qsaz <- tslm(treino ~ trend + I(trend^2) + season)
-reg_exp <- tslm(treino ~ trend + season, lambda = 0)
 
-# Soma zero
-sazon_treino <- factor(cycle(treino), levels = 1:12)
-contrasts(sazon_treino) <- contr.sum(12)
-reg_saz0 <- tslm(treino ~ trend + sazon_treino)
+mod_reg <- list("Linear"               = reg_lin,
+                "Quadrática"           = reg_quad,
+                "Linear + sazonal"     = reg_saz,
+                "Quadrática + sazonal" = reg_qsaz)
 
 # Previsões
 h <- n_teste
+prev_reg <- lapply(mod_reg, forecast, h = h)
 
-prev_reg <- list(
-  lin  = forecast(reg_lin,  h = h),
-  quad = forecast(reg_quad, h = h),
-  saz  = forecast(reg_saz,  h = h),
-  qsaz = forecast(reg_qsaz, h = h),
-  exp  = forecast(reg_exp,  h = h) 
-)
-
-# Diagnóstico do melhor
-acc_reg <- sapply(prev_reg, function(p) {
-  acc <- accuracy(p, teste)
-  acc[nrow(acc), "RMSE"]
-})
-melhor_reg <- names(which.min(acc_reg))
+# Melhor modelo do grupo (menor RMSE no teste)
+melhor_reg <- names(which.min(rmse_teste(prev_reg)))
 cat("Melhor modelo de regressão:", melhor_reg, "\n")
-checkresiduals(get(paste0("reg_", melhor_reg)), test = "LB")
 
 # Métricas no teste
-sapply(prev_reg, function(p) {
-  acc <- accuracy(p, teste)
-  acc[nrow(acc), c("RMSE","MAE","MAPE")]
-})
+tab_reg <- tab_metricas(prev_reg)
+salvar_tabela(tab_reg, "metricas_regressao")
+kable_padrao(tab_reg, "Métricas no conjunto de teste: modelos de regressão")
+
+# Gráfico das previsões do grupo
+g_prev_reg <- grafico_previsoes(prev_reg, "Previsões dos modelos de regressão no conjunto de teste")
+g_prev_reg
+salvar_grafico(g_prev_reg, "previsoes_regressao", 10, 5)
+
+# Diagnóstico de resíduos do melhor modelo
+d_reg <- diagnostico_residuos(mod_reg[[melhor_reg]],
+                              paste("Regressão:", melhor_reg),
+                              "diag_residuos_regressao")
+d_reg$grafico
+kable_padrao(d_reg$testes, "Testes sobre os resíduos: melhor modelo de regressão")
 ```
 
 
@@ -602,7 +732,7 @@ tabela_suavizacao <- tibble(
   Modelo = c("2.1 Média móvel simples (MMS)",
              "2.2 SES — ETS(A,N,N)",
              "2.3 Holt — ETS(A,A,N)",
-             "2.5 Holt-Winters aditivo — ETS(A,A,A)"),
+             "2.4 Holt-Winters aditivo — ETS(A,A,A)"),
   Componentes = c("Nível",
                   "Nível",
                   "Nível + tendência",
@@ -631,7 +761,7 @@ kable(tabela_suavizacao,
 
 
 ```{r}
-# MMS
+# MMS: k escolhido pelo menor EQM das previsões um passo à frente
 seq_k <- sapply(2:12, function(k) {
   M <- stats::filter(treino, rep(1/k, k), sides = 1)
   e <- treino[-(1:k)] - as.numeric(M[k:(length(treino) - 1)])
@@ -640,7 +770,10 @@ seq_k <- sapply(2:12, function(k) {
 k_otimo  <- (2:12)[which.min(seq_k)]
 prev_mms <- ts(rep(mean(tail(treino, k_otimo)), h),
                start = start(teste), frequency = 12)
-accuracy(prev_mms, teste)
+
+tab_k <- tibble(k = 2:12, EQM = round(seq_k, 2))
+salvar_tabela(tab_k, "mms_escolha_k")
+kable_padrao(tab_k, paste0("EQM da média móvel simples por k (k ótimo = ", k_otimo, ")"))
 
 # Suavização 
 ses_m  <- ets(treino, model = "ANN")
@@ -648,43 +781,66 @@ holt_m <- ets(treino, model = "AAN", damped = FALSE)
 hw_m   <- ets(treino, model = "AAA", damped = FALSE)
 
 # Conversão de parâmetros
-alpha      <- hw_m$par["alpha"]
-beta_aula  <- hw_m$par["beta"]  / alpha
-gamma_aula <- hw_m$par["gamma"] / (1 - alpha)
+alfa       <- hw_m$par["alpha"]
+beta_aula  <- hw_m$par["beta"]  / alfa
+gamma_aula <- hw_m$par["gamma"] / (1 - alfa)
 
-c(SES = ses_m$aicc, Holt = holt_m$aicc, HW = hw_m$aicc)
-checkresiduals(hw_m)
+# Comparação por AICc entre os modelos de suavização
+tab_aicc <- tibble(Modelo = c("SES", "Holt", "Holt-Winters"),
+                   AICc = round(c(ses_m$aicc, holt_m$aicc, hw_m$aicc), 2))
+salvar_tabela(tab_aicc, "aicc_suavizacao")
+kable_padrao(tab_aicc, "AICc dos modelos de suavização (ajuste no treino)")
 
-kable(tibble(Parâmetro = c("α", "β (aula)", "γ (aula)"),
-             Valor = round(unname(c(alpha, beta_aula, gamma_aula)), 4)),
-      caption = "Parâmetros de suavização do Holt-Winters (parametrização da aula)")
+tab_par_hw <- tibble(Parâmetro = c("α", "β (aula)", "γ (aula)"),
+                     Valor = round(unname(c(alfa, beta_aula, gamma_aula)), 4))
+salvar_tabela(tab_par_hw, "parametros_holt_winters")
+kable_padrao(tab_par_hw, "Parâmetros de suavização do Holt-Winters (parametrização da aula)")
+
 # Lista
+mod_suav <- list(SES = ses_m, Holt = holt_m, "Holt-Winters" = hw_m)
+
 prev_suav <- list(
   MMS  = prev_mms,
   SES  = forecast(ses_m,  h = h),
   Holt = forecast(holt_m, h = h),
-  HW   = forecast(hw_m,   h = h)
+  "Holt-Winters" = forecast(hw_m, h = h)
 )
 
-rmse_teste <- function(lista_prev) sapply(lista_prev, function(p) {
-  a <- accuracy(p, teste); a[nrow(a), "RMSE"]
-})
-
-mod_suav <- list(SES = ses_m, Holt = holt_m, HW = hw_m)
 melhor_suav <- names(which.min(rmse_teste(prev_suav)))
-if (melhor_suav %in% names(mod_suav)) checkresiduals(mod_suav[[melhor_suav]])
+cat("Melhor modelo de suavização:", melhor_suav, "\n")
 
-sapply(prev_suav, function(p) {
-  acc <- accuracy(p, teste)
-  acc[nrow(acc), c("RMSE", "MAE", "MAPE")]
-})
+# Métricas no teste
+tab_suav <- tab_metricas(prev_suav)
+salvar_tabela(tab_suav, "metricas_suavizacao")
+kable_padrao(tab_suav, "Métricas no conjunto de teste: modelos de suavização")
+
+# Gráfico das previsões do grupo
+g_prev_suav <- grafico_previsoes(prev_suav, "Previsões dos modelos de suavização no conjunto de teste")
+g_prev_suav
+salvar_grafico(g_prev_suav, "previsoes_suavizacao", 10, 5)
+
+# Diagnóstico de resíduos do Holt-Winters (principal candidato do grupo)
+d_hw <- diagnostico_residuos(hw_m, "Suavização: Holt-Winters", "diag_residuos_holt_winters")
+d_hw$grafico
+kable_padrao(d_hw$testes, "Testes sobre os resíduos: Holt-Winters")
+
+# Se o melhor do grupo for SES ou Holt, diagnostica-o também
+d_suav_melhor <- NULL
+if (melhor_suav %in% c("SES", "Holt")) {
+  d_suav_melhor <- diagnostico_residuos(mod_suav[[melhor_suav]],
+                                        paste("Suavização:", melhor_suav),
+                                        "diag_residuos_suavizacao_melhor")
+}
+if (!is.null(d_suav_melhor)) d_suav_melhor$grafico
+if (!is.null(d_suav_melhor)) kable_padrao(d_suav_melhor$testes,
+                                          paste("Testes sobre os resíduos:", melhor_suav))
 ```
 
 
 
 ## Bloco 3: Grupo de modelos Box-Jenkins
 
-Para séries mensais com sazonalidade, modelos autorregressivos integrados de médias móveis são os principais candidatos. AR, MA e ARMA entram como modelos intermediários. O ciclo de modelagem é iterativo:
+Nesta classe de modelos (AR, MA, ARMA e ARIMA, sem componente sazonal), a sazonalidade da série não é modelada explicitamente, o que é uma limitação a ser discutida nos resultados. O ciclo de modelagem é iterativo:
 
 1. **Identificação**: estacionariedade (testes ADF/KPSS, diferenciações) e análise de ACF/PACF.
 2. **Estimação**: escolha das ordens e dos parâmetros.
@@ -698,11 +854,12 @@ tabela_arima <- tibble(
             "$Y_t = \\theta(B)a_t$",
             "$\\phi(B)Y_t = \\theta(B)a_t$",
             "$\\phi(B)\\nabla^d Y_t = \\theta(B)a_t$"),
-  Condição = c("Sempre invertível; estacionário se raízes de $\\phi(z)$ fora do círculo unitário (AR(1): $|\\phi| < 1$)",
-               "Sempre estacionário; invertível se raízes de $\\theta(z)$ fora do círculo unitário (MA(1): $|\\theta| < 1$)",
-               "As duas condições acima",
-               "ARMA na série diferenciada $d$ vezes"),
-  ACF = c("Decai", "Corta após $q$", "Decai", "Na série diferenciada"),
+  Condição = c(
+    "Sempre invertível; estacionário se raízes de $\\phi(z)$ fora do círculo unitário (AR(1): $\\lvert \\phi \\rvert < 1$)",
+    "Sempre estacionário; invertível se raízes de $\\theta(z)$ fora do círculo unitário (MA(1): $\\lvert \\theta \\rvert < 1$)",
+    "As duas condições acima",
+    "ARMA na série diferenciada $d$ vezes"),
+  ACF  = c("Decai", "Corta após $q$", "Decai", "Na série diferenciada"),
   PACF = c("Corta após $p$", "Decai", "Decai", "Na série diferenciada")
 )
 
@@ -716,6 +873,7 @@ kable(tabela_arima,
   column_spec(1, bold = TRUE) %>%
   column_spec(3, width = "6cm")
 ```
+
 
 **Estimação:**
 * **Condicional (CSS)**: minimiza $\sum a_t^2$ fixando os valores iniciais.
@@ -734,138 +892,193 @@ $$
 \qquad
 V(h) = \left(1 + \sum_{i=1}^{h-1} \psi_i^2\right) \sigma_a^2
 $$
+
+### Identificação
+
 ```{r}
 # Identificação na série diferenciada
 w <- diff(treino)
-tsdisplay(w, lag.max = 36)
+
+g_dif <- grafico_ts(w, "Série de treino diferenciada (1ª diferença)", "Diferença de casos") /
+  (criar_grafico_correlacao(w, "ACF",  36, "ACF da série diferenciada") |
+   criar_grafico_correlacao(w, "PACF", 36, "PACF da série diferenciada"))
+
+g_dif
+salvar_grafico(g_dif, "identificacao_serie_diferenciada", 10, 8)
+
 adf.test(w); kpss.test(w)
 
+# Lags significativos (fora das bandas de 95%)
+lim <- qnorm(0.975) / sqrt(length(w))
+lags_acf  <- which(abs(as.numeric(Acf(w,  lag.max = 36, plot = FALSE)$acf)[-1]) > lim)
+lags_pacf <- which(abs(as.numeric(Pacf(w, lag.max = 36, plot = FALSE)$acf))     > lim)
+
+tab_lags <- tibble(Função = c("ACF", "PACF"),
+                   `Lags significativos` = c(paste(lags_acf, collapse = ", "),
+                                             paste(lags_pacf, collapse = ", ")))
+salvar_tabela(tab_lags, "lags_significativos_serie_diferenciada")
+kable_padrao(tab_lags, "Lags significativos na série diferenciada (treino)")
+```
+
+### Estimação
+
+```{r}
 # Modelos intermediários
 m_ar   <- Arima(treino, order = c(1,1,0))
 m_ma   <- Arima(treino, order = c(0,1,1))
 m_arma <- Arima(treino, order = c(1,1,1))
 
-# Yule-Walker
+# Yule-Walker (AR(2) na série diferenciada)
 m_ar_yw <- ar(w, aic = FALSE, order.max = 2, method = "yule-walker")
+tab_yw <- tibble(Parâmetro = c("φ1", "φ2"), Valor = round(as.numeric(m_ar_yw$ar), 4))
+salvar_tabela(tab_yw, "yule_walker_ar2")
+kable_padrao(tab_yw, "Estimativas de Yule-Walker: AR(2) na série diferenciada")
 
 # CSS vs ML
 m_css <- Arima(treino, order = c(1,1,1), method = "CSS")
 m_ml  <- Arima(treino, order = c(1,1,1), method = "ML")
-rbind(CSS = coef(m_css), ML = coef(m_ml))
 
-# auto.arima
-m_auto <- auto.arima(treino, stepwise = FALSE, approximation = FALSE, seasonal = FALSE)
-
-# Diagnóstico
-diag_arima <- function(m) {
-  r <- residuals(m); k <- length(coef(m))
-  checkresiduals(m, plot = TRUE)
-  print(Box.test(r, lag = 24, type = "Ljung-Box", fitdf = k))
-  print(shapiro.test(r))
-  print(ks.test(scale(r), "pnorm"))
-  qqnorm(r); qqline(r)
-  Pacf(r, lag.max = 36)
-}
-
-# Comparação e previsão
-modelos_arima <- list(
-  AR   = m_ar,
-  MA   = m_ma,
-  ARMA = m_arma,
-  auto = m_auto
+tab_css_ml <- bind_rows(
+  tibble(Método = "CSS", Parâmetro = names(coef(m_css)), Valor = round(unname(coef(m_css)), 4)),
+  tibble(Método = "ML",  Parâmetro = names(coef(m_ml)),  Valor = round(unname(coef(m_ml)), 4))
 )
+salvar_tabela(tab_css_ml, "css_vs_ml_arima111")
+kable_padrao(tab_css_ml, "Estimativas CSS vs. ML: ARIMA(1,1,1)")
+```
 
-sapply(modelos_arima, function(m) c(AICc = m$aicc, BIC = m$bic))
+### Diagnóstico, previsão e escolha do melhor modelo do grupo
+
+```{r}
+modelos_arima <- list(
+  "ARIMA(1,1,0)" = m_ar,
+  "ARIMA(0,1,1)" = m_ma,
+  "ARIMA(1,1,1)" = m_arma
+)
 
 prev_arima <- lapply(modelos_arima, forecast, h = h)
 
+# Melhor modelo inicial (menor RMSE no teste) e diagnóstico
 melhor_arima <- names(which.min(rmse_teste(prev_arima)))
-diag_arima(modelos_arima[[melhor_arima]])
+m_melhor <- modelos_arima[[melhor_arima]]
 
-w <- diff(treino)
-lim <- qnorm(0.975) / sqrt(length(w))
-which(abs(Acf(w, lag.max = 36, plot = FALSE)$acf) > lim)
-which(abs(Pacf(w, lag.max = 36, plot = FALSE)$acf)     > lim) 
+d_arima <- diagnostico_residuos(m_melhor,
+                                paste("Box-Jenkins:", melhor_arima),
+                                "diag_residuos_arima_inicial",
+                                fitdf = fitdf_arima(m_melhor))
+d_arima$grafico
+kable_padrao(d_arima$testes, paste("Testes sobre os resíduos:", melhor_arima))
+```
 
-sapply(prev_arima, function(p) {
-  acc <- accuracy(p, teste)
-  acc[nrow(acc), c("RMSE","MAE","MAPE")]
-})
+Se o teste de Ljung-Box rejeitar a hipótese de ruído branco, identifica-se a estrutura restante nos resíduos (ACF/PACF do painel acima), ajusta-se um ARIMA($p_1, d_1, q_1$) a eles e combina-se com o modelo inicial.
+
+```{r}
+# Ordem (p1, d1, q1) identificada nos resíduos: ajustar após inspecionar
+# a ACF/PACF dos resíduos do painel acima
+ordem_res <- c(1, 0, 0)
+
+lb_p <- d_arima$testes$`p-valor`[1]
+d_comb <- NULL
+
+if (lb_p < 0.05) {
+  # Ajuste aos resíduos do modelo inicial
+  m_res <- Arima(residuals(m_melhor), order = ordem_res)
+
+  # Modelo combinado: (p0+p1, d0+d1, q0+q1)
+  ordem_base <- as.integer(arimaorder(m_melhor)[c("p", "d", "q")])
+  ordem_comb <- ordem_base + as.integer(ordem_res)
+  nome_comb  <- sprintf("ARIMA(%d,%d,%d) combinado",
+                        ordem_comb[1], ordem_comb[2], ordem_comb[3])
+
+  m_comb <- Arima(treino, order = ordem_comb)
+  modelos_arima[[nome_comb]] <- m_comb
+  prev_arima[[nome_comb]]    <- forecast(m_comb, h = h)
+
+  melhor_arima <- names(which.min(rmse_teste(prev_arima)))
+
+  d_comb <- diagnostico_residuos(m_comb,
+                                 paste("Box-Jenkins:", nome_comb),
+                                 "diag_residuos_arima_combinado",
+                                 fitdf = fitdf_arima(m_comb))
+}
+
+if (!is.null(d_comb)) d_comb$grafico
+if (!is.null(d_comb)) kable_padrao(d_comb$testes, "Testes sobre os resíduos: modelo combinado")
+
+cat("Melhor modelo Box-Jenkins:", melhor_arima, "\n")
+
+# Métricas no teste
+tab_arima <- tab_metricas(prev_arima)
+salvar_tabela(tab_arima, "metricas_box_jenkins")
+kable_padrao(tab_arima, "Métricas no conjunto de teste: modelos Box-Jenkins")
+
+# Gráfico das previsões do grupo
+g_prev_arima <- grafico_previsoes(prev_arima, "Previsões dos modelos Box-Jenkins no conjunto de teste")
+g_prev_arima
+salvar_grafico(g_prev_arima, "previsoes_box_jenkins", 10, 5)
 ```
 
 
 ## Bloco 4: melhor modelo de cada grupo
 
 ```{r}
-# Escolha dinâmica do melhor modelo de cada grupo
-
-melhor_modelo <- function(lista_prev) {
-  rmse <- sapply(lista_prev, function(p) {
-    acc <- accuracy(p, teste)
-    acc[nrow(acc), "RMSE"]
-  })
-  lista_prev[[which.min(rmse)]]
-}
-
-# Seleciona o vencedor de cada grupo
-best_reg   <- melhor_modelo(prev_reg)
-best_suav  <- melhor_modelo(prev_suav)
-best_arima <- melhor_modelo(prev_arima)
-
+# Vencedor de cada grupo (menor RMSE no teste)
 finalistas <- list(
-  Regressao  = best_reg,
-  Suavizacao = best_suav,
-  ARIMA      = best_arima
+  "Regressão"   = prev_reg[[melhor_reg]],
+  "Suavização"  = prev_suav[[melhor_suav]],
+  "Box-Jenkins" = prev_arima[[melhor_arima]]
 )
 
-# Tabela Comparativa
-tab <- t(sapply(finalistas, function(p) {
-  acc <- accuracy(p, teste)
-  acc[nrow(acc), c("RMSE", "MAE", "MAPE")]
+# Tabela comparativa
+tab_final <- bind_cols(
+  tibble(Grupo  = names(finalistas),
+         Modelo = c(melhor_reg, melhor_suav, melhor_arima)),
+  tab_metricas(finalistas) %>% select(-Modelo)
+)
+
+salvar_tabela(tab_final, "comparacao_melhores_modelos")
+kable_padrao(tab_final, "Melhor modelo de cada grupo no conjunto de teste")
+
+# Gráfico comparativo
+g_final <- autoplot(treino, series = "Treino") +
+  autolayer(teste, series = "Teste") +
+  autolayer(media_prev(finalistas[["Regressão"]]),   series = "Regressão") +
+  autolayer(media_prev(finalistas[["Suavização"]]),  series = "Suavização") +
+  autolayer(media_prev(finalistas[["Box-Jenkins"]]), series = "Box-Jenkins") +
+  scale_colour_manual(values = c(Treino = "black", Teste = "purple",
+                                 "Regressão" = "darkorange", "Suavização" = "steelblue",
+                                 "Box-Jenkins" = "firebrick")) +
+  labs(title = "Melhor modelo de cada grupo no conjunto de teste",
+       x = "Tempo", y = "Casos diagnosticados", colour = "") +
+  tema_relatorio
+
+g_final
+salvar_grafico(g_final, "comparacao_melhores_modelos", 10, 5)
+
+# Previsões de todos os modelos (pontuais e intervalos de 95%)
+todas_prev <- c(prev_reg, prev_suav, prev_arima)
+grupos <- rep(c("Regressão", "Suavização", "Box-Jenkins"),
+              c(length(prev_reg), length(prev_suav), length(prev_arima)))
+
+previsoes_df <- bind_rows(lapply(seq_along(todas_prev), function(i) {
+  p <- todas_prev[[i]]
+  if (inherits(p, "forecast")) {
+    tibble(Grupo = grupos[i], Modelo = names(todas_prev)[i],
+           Data = ts_para_data(p$mean), Observado = as.numeric(teste),
+           Previsão = as.numeric(p$mean),
+           IC95_inf = as.numeric(p$lower[, 2]), IC95_sup = as.numeric(p$upper[, 2]))
+  } else {
+    tibble(Grupo = grupos[i], Modelo = names(todas_prev)[i],
+           Data = ts_para_data(p), Observado = as.numeric(teste),
+           Previsão = as.numeric(p), IC95_inf = NA_real_, IC95_sup = NA_real_)
+  }
 }))
 
-print(tab)
+salvar_tabela(previsoes_df, "previsoes_todos_os_modelos")
 
-melhor_reg
-melhor_suav
-melhor_arima
-
-# Gráfico Comparativo 
-autoplot(treino, series = "Treino") + 
-  autolayer(teste, series = "Teste") +
-  autolayer(finalistas$Regressao,  series = "Regressão") +
-  autolayer(finalistas$Suavizacao, series = "Suavização") +
-  autolayer(finalistas$ARIMA,      series = "ARIMA") +
-  labs(x = "Tempo", y = "Casos", colour = "") + 
-  theme_minimal()
-
-# Gráfico Comparativo
-media_prev <- function(p) if (inherits(p, "forecast")) p$mean else p   # MMS é só um ts
-
-autoplot(treino, series = "Treino") +
-  autolayer(teste, series = "Teste") +
-  autolayer(media_prev(finalistas$Regressao),  series = "Regressão") +
-  autolayer(media_prev(finalistas$Suavizacao), series = "Suavização") +
-  autolayer(media_prev(finalistas$ARIMA),      series = "ARIMA") +
-  scale_colour_manual(values = c(Treino = "black", Teste = "purple",
-                                 Regressão = "darkorange", Suavização = "steelblue",
-                                 ARIMA = "firebrick")) +
-  labs(x = "Tempo", y = "Casos diagnosticados", colour = "") +
-  theme_minimal()
-
-# Gráfico Comparativo
-media_prev1 <- function(p) if (inherits(p, "forecast")) p$mean else p   # MMS é só um ts
-
-autoplot(treino, series = "Treino") +
-  autolayer(teste, series = "Teste") +
-  autolayer(media_prev1(finalistas$Regressao),  series = "Regressão") +
-  autolayer(media_prev1(finalistas$Suavizacao), series = "Suavização") +
-  autolayer(media_prev1(finalistas$ARIMA),      series = "ARIMA") +
-  scale_colour_manual(values = c(Treino = "black", Teste = "purple",
-                                 Regressão = "darkorange", Suavização = "steelblue",
-                                 ARIMA = "firebrick")) +
-  labs(x = "Tempo", y = "Casos diagnosticados", colour = "") +
-  tema_relatorio
+# Objetos do R
+saveRDS(list(regressao = mod_reg, suavizacao = mod_suav, box_jenkins = modelos_arima),
+        file.path(dir_resultados, "modelos", "modelos_ajustados.rds"))
+saveRDS(finalistas, file.path(dir_resultados, "modelos", "finalistas.rds"))
 ```
 
 
